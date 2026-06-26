@@ -4,7 +4,10 @@ Extracts text blocks (paragraphs) with bounding boxes and per-word boxes so the
 UI can do hit-testing for sentence/word selection. Also renders pages to pixmaps.
 """
 
+import re
 import fitz  # PyMuPDF
+
+_DOT_LEADER = re.compile(r"(\.\s?){3,}")  # "...." or ". . . ." table-of-contents
 
 
 def _is_translatable(text):
@@ -47,12 +50,38 @@ class PDFDocument:
                         sizes.append(s["size"])
         return sum(sizes) / len(sizes) if sizes else 9.0
 
-    def _rule_regions(self, page):
-        """Detect booktabs-style tables (horizontal rules, no vertical borders).
-        Find horizontal rule segments from the page vector drawings, cluster
-        those that share an x-range, and treat the band spanned by a cluster of
-        >=2 rules as a table region. Two-column prose has no such rules, so it
-        is not misdetected."""
+    def _is_tabular_band(self, words, band, pw):
+        """Decide whether the text inside `band` is laid out in columns (a real
+        table) rather than flowing prose (a title/abstract that merely happens
+        to sit between two rules). A line is 'tabular' if its words have a large
+        horizontal gap (a column gap, not normal word spacing). Dot-leader TOC
+        lines fill the gap with dots, so they are NOT counted as tabular."""
+        gap_thresh = max(15.0, 0.035 * pw)
+        lines = {}
+        for w in words:
+            x0, y0, x1, y1 = w[0], w[1], w[2], w[3]
+            if y0 >= band.y0 - 1 and y1 <= band.y1 + 1 and \
+               x0 >= band.x0 - 1 and x1 <= band.x1 + 1:
+                lines.setdefault((w[5], w[6]), []).append(w)
+        total = 0
+        tabular = 0
+        for ws in lines.values():
+            total += 1
+            if len(ws) < 2:
+                continue
+            ws.sort(key=lambda w: w[0])
+            max_gap = max(ws[i + 1][0] - ws[i][2] for i in range(len(ws) - 1))
+            if max_gap > gap_thresh:
+                tabular += 1
+        if total == 0:
+            return False
+        return tabular >= 2 and tabular / total >= 0.5
+
+    def _rule_regions(self, page, words):
+        """Detect borderless (booktabs) tables via horizontal rules, but only
+        keep regions whose content is actually column-structured. This stops
+        titles/abstracts/body text that merely sit between rules from being
+        excluded from translation."""
         pw = page.rect.width
         try:
             drawings = page.get_drawings()
@@ -63,12 +92,12 @@ class PDFDocument:
         for d in drawings:
             for it in d.get("items", []):
                 try:
-                    if it[0] == "l":                      # line segment
+                    if it[0] == "l":
                         p1, p2 = it[1], it[2]
                         if abs(p1.y - p2.y) <= 1.0 and abs(p2.x - p1.x) >= minlen:
                             x0, x1 = sorted([p1.x, p2.x])
                             rules.append([x0, x1, (p1.y + p2.y) / 2])
-                    elif it[0] == "re":                   # thin wide rectangle
+                    elif it[0] == "re":
                         r = it[1]
                         if r.height <= 2.0 and r.width >= minlen:
                             rules.append([r.x0, r.x1, (r.y0 + r.y1) / 2])
@@ -85,6 +114,7 @@ class PDFDocument:
                 a = parent[a]
             return a
 
+        # cluster rules that overlap horizontally
         for i in range(n):
             for j in range(i + 1, n):
                 ax0, ax1 = rules[i][0], rules[i][1]
@@ -96,17 +126,33 @@ class PDFDocument:
         groups = {}
         for i in range(n):
             groups.setdefault(find(i), []).append(i)
+
+        MAXGAP = 220.0  # don't let far-apart rules merge across body text
         regions = []
         for g in groups.values():
-            if len(g) < 2:
-                continue
-            xs0 = min(rules[i][0] for i in g)
-            xs1 = max(rules[i][1] for i in g)
-            ys0 = min(rules[i][2] for i in g)
-            ys1 = max(rules[i][2] for i in g)
-            if ys1 - ys0 < 2:
-                continue  # rules all on the same line -> not a table band
-            regions.append(fitz.Rect(xs0, ys0 - 2, xs1, ys1 + 2))
+            rs = sorted(g, key=lambda i: rules[i][2])
+            # split the group into vertically-contiguous runs of rules
+            run = [rs[0]]
+            runs = []
+            for idx in rs[1:]:
+                if rules[idx][2] - rules[run[-1]][2] <= MAXGAP:
+                    run.append(idx)
+                else:
+                    runs.append(run)
+                    run = [idx]
+            runs.append(run)
+            for run in runs:
+                if len(run) < 2:
+                    continue
+                xs0 = min(rules[i][0] for i in run)
+                xs1 = max(rules[i][1] for i in run)
+                ys0 = min(rules[i][2] for i in run)
+                ys1 = max(rules[i][2] for i in run)
+                if ys1 - ys0 < 2:
+                    continue
+                band = fitz.Rect(xs0, ys0 - 2, xs1, ys1 + 2)
+                if self._is_tabular_band(words, band, pw):
+                    regions.append(band)
         return regions
 
     def _find_tables(self, page):
@@ -144,12 +190,15 @@ class PDFDocument:
         for pno in range(self.doc.page_count):
             page = self.doc.load_page(pno)
             page_blocks = []
+            words = page.get_text("words")
 
             # 1) detect tables first so prose inside them can be excluded.
             #    Combine the line-based finder with a horizontal-rule detector
-            #    so borderless (booktabs) tables are caught too.
+            #    (gated by column structure) so borderless tables are caught
+            #    without misclassifying titles/abstracts/body as tables.
             tables = self._find_tables(page)
-            table_rects = [t["bbox"] for t in tables] + self._rule_regions(page)
+            table_rects = [t["bbox"] for t in tables] + \
+                self._rule_regions(page, words)
 
             # 2) prose paragraphs (skip any block sitting inside a table region)
             data = page.get_text("dict")
@@ -160,20 +209,48 @@ class PDFDocument:
                 cx = (bx[0] + bx[2]) / 2
                 cy = (bx[1] + bx[3]) / 2
                 if _rect_center_in(cx, cy, table_rects):
-                    continue  # handled as table cells below
-                lines = []
-                sizes = []
-                for line in block.get("lines", []):
+                    continue
+
+                block_lines = block.get("lines", [])
+                line_texts = []
+                line_meta = []  # (text, bbox, avg_size)
+                for line in block_lines:
                     span_texts = []
+                    lsizes = []
                     for s in line.get("spans", []):
                         span_texts.append(s["text"])
                         if s.get("size"):
-                            sizes.append(s["size"])
-                    lines.append("".join(span_texts))
-                text = " ".join(l.strip() for l in lines if l.strip()).strip()
-                if not text:
+                            lsizes.append(s["size"])
+                    ltext = "".join(span_texts).strip()
+                    if ltext:
+                        line_texts.append(ltext)
+                        line_meta.append((
+                            ltext, line.get("bbox", bx),
+                            sum(lsizes) / len(lsizes) if lsizes else 10.0))
+
+                if not line_texts:
                     continue
-                avg_size = sum(sizes) / len(sizes) if sizes else 10.0
+
+                # Table-of-contents / list: lines with dot leaders. Translate
+                # each line on its own so entries + page numbers stay aligned
+                # instead of being merged into one run.
+                dotted = sum(1 for t in line_texts if _DOT_LEADER.search(t))
+                if dotted >= 2 and len(line_meta) >= 2:
+                    for li, (ltext, lbbox, lsize) in enumerate(line_meta):
+                        page_blocks.append({
+                            "id": "p%d_b%d_l%d" % (pno, bidx, li),
+                            "page": pno,
+                            "bbox": tuple(lbbox),
+                            "text": ltext,
+                            "size": lsize,
+                            "translatable": _is_translatable(ltext),
+                            "kind": "toc",
+                        })
+                    continue
+
+                # normal paragraph: join wrapped lines with spaces
+                text = " ".join(line_texts).strip()
+                avg_size = sum(m[2] for m in line_meta) / len(line_meta)
                 page_blocks.append({
                     "id": "p%d_b%d" % (pno, bidx),
                     "page": pno,
@@ -191,7 +268,7 @@ class PDFDocument:
             #    these regions out of the prose flow.)
 
             self.blocks[pno] = page_blocks
-            self.words[pno] = page.get_text("words")
+            self.words[pno] = words
 
     def page_size(self, pno):
         """Return (width, height) in PDF points."""

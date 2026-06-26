@@ -30,6 +30,8 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRectF, QPointF, QTimer
 
+import threading
+
 from pdf_parser import PDFDocument
 from db import Cache
 from llm import LLMClient
@@ -62,15 +64,21 @@ class TranslateWorker(QThread):
     chunk = pyqtSignal(str, str)
     failed = pyqtSignal(str)
 
-    def __init__(self, client, cache, doc_name, jobs):
+    def __init__(self, client, cache, doc_name, jobs, stop_event=None):
         super().__init__()
         self.client = client
         self.cache = cache
         self.doc_name = doc_name
         self.jobs = jobs
+        self.stop_event = stop_event
+
+    def _stopped(self):
+        return self.stop_event is not None and self.stop_event.is_set()
 
     def run(self):
         for block_id, text in self.jobs:
+            if self._stopped():
+                return
             try:
                 self.started_block.emit(block_id)
                 cached = self.cache.get_translation(
@@ -80,6 +88,8 @@ class TranslateWorker(QThread):
                     continue
                 full = ""
                 for delta in self.client.translate_stream(text):
+                    if self._stopped():
+                        return
                     full += delta
                     self.chunk.emit(block_id, delta)
                 if full:
@@ -542,7 +552,7 @@ class TranslationView(SelectableView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PDF Translate v5 — 论文翻译（表格按格翻译）")
+        self.setWindowTitle("PDF Translate v6 — 论文翻译")
         self.resize(1300, 880)
 
         self.doc = None
@@ -554,6 +564,7 @@ class MainWindow(QMainWindow):
         self._syncing = False
         self.popup = None
         self._gen = 0
+        self.stop_event = threading.Event()
 
         self.original = OriginalView()
         self.translation = TranslationView()
@@ -601,6 +612,9 @@ class MainWindow(QMainWindow):
         tr_all = QAction("翻译全部", self)
         tr_all.triggered.connect(self.translate_all)
         tb.addAction(tr_all)
+        stop_act = QAction("停止", self)
+        stop_act.triggered.connect(self.stop_translation)
+        tb.addAction(stop_act)
         tb.addSeparator()
         set_act = QAction("设置", self)
         set_act.triggered.connect(self.open_settings)
@@ -715,12 +729,17 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "需要 API Key",
                                 "请先在“设置”中填写 API Key 与模型。")
             return
-        worker = TranslateWorker(self.client, self.cache, self.doc_name, jobs)
+        self.stop_event.clear()  # allow this run
+        worker = TranslateWorker(self.client, self.cache, self.doc_name, jobs,
+                                 self.stop_event)
         worker.started_block.connect(self.translation.start_block)
         worker.chunk.connect(self.translation.append_chunk)
         worker.failed.connect(self._on_worker_failed)
         self.workers.append(worker)
         worker.start()
+
+    def stop_translation(self):
+        self.stop_event.set()
 
     def translate_current_page(self):
         if not self.doc:
