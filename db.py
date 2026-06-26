@@ -65,6 +65,13 @@ class Cache:
             )
             self.conn.commit()
 
+    def clear_doc(self, doc):
+        """Delete all cached translations for a document so re-opening it shows
+        the original (no auto-filled translations)."""
+        with self._lock:
+            self.conn.execute("DELETE FROM translations WHERE doc=?", (doc,))
+            self.conn.commit()
+
     # --- word definitions ---
     def get_word(self, word, model):
         with self._lock:

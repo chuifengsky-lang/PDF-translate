@@ -1,4 +1,17 @@
+# PDF Translate — Python dependencies
+# 安装：  pip install -r requirements.txt
+# 建议 Python 3.10+
+
+# GUI 框架（主窗口、图形视图、弹窗、设置对话框）
 PyQt6>=6.6
-pymupdf>=1.24
+
+# PDF 解析与渲染（fitz）。
+# 需要 >=1.23 才有 find_tables 表格检测；这里用 1.24 起更稳。
+PyMuPDF>=1.24
+
+# 调用 DeepSeek（OpenAI 兼容接口）。base_url 指向 https://api.deepseek.com
 openai>=1.30
+
+# 把 API Key 存到操作系统凭据库（Windows 凭据管理器等）。
+# 装不上也能用：会自动退回到 QSettings 明文存储。
 keyring>=25

@@ -56,45 +56,93 @@ def page_layout(doc):
 
 
 # --------------------------------------------------------------------------- #
+# Text splitting (whole-paragraph translation -> per-fragment boxes)
+# --------------------------------------------------------------------------- #
+_BREAKS = set("。！？，、；：,.!?;: ")
+
+
+def _nearest_break(s, pos):
+    """Find a sentence/clause boundary near `pos` so a split doesn't cut a word."""
+    n = len(s)
+    pos = max(0, min(pos, n))
+    for d in range(0, 26):
+        for c in (pos + d, pos - d):
+            if 0 <= c < n and s[c] in _BREAKS:
+                return c + 1
+    return pos
+
+
+def split_text(full, weights):
+    """Split `full` into len(weights) pieces sized proportional to weights,
+    cutting at the nearest clause boundary. Used to flow a whole-paragraph
+    translation back across the original column/page fragment boxes."""
+    n = len(weights)
+    if n <= 1:
+        return [full]
+    total = sum(weights) or 1
+    pieces = []
+    start = 0
+    acc = 0
+    L = len(full)
+    for i in range(n - 1):
+        acc += weights[i]
+        cut = _nearest_break(full, round(L * acc / total))
+        cut = max(start, cut)
+        pieces.append(full[start:cut].strip())
+        start = cut
+    pieces.append(full[start:].strip())
+    return pieces
+
+
+# --------------------------------------------------------------------------- #
 # Workers
 # --------------------------------------------------------------------------- #
 class TranslateWorker(QThread):
-    """Translate a page/document, streaming each paragraph block."""
+    """Translate units (a unit may span several fragment boxes). The whole unit
+    is translated as one piece of text (so sentences split across columns/pages
+    keep their meaning), then the result is flowed back into the fragments."""
     started_block = pyqtSignal(str)
-    chunk = pyqtSignal(str, str)
+    chunk = pyqtSignal(str, str)       # live preview into the first fragment
+    set_pieces = pyqtSignal(list)      # [(block_id, final_text), ...]
     failed = pyqtSignal(str)
 
-    def __init__(self, client, cache, doc_name, jobs, stop_event=None):
+    def __init__(self, client, cache, doc_name, units, stop_event=None):
         super().__init__()
         self.client = client
         self.cache = cache
         self.doc_name = doc_name
-        self.jobs = jobs
+        self.units = units
         self.stop_event = stop_event
 
     def _stopped(self):
         return self.stop_event is not None and self.stop_event.is_set()
 
     def run(self):
-        for block_id, text in self.jobs:
+        for unit in self.units:
             if self._stopped():
                 return
+            frags = unit["fragments"]
+            weights = unit["weights"]
             try:
-                self.started_block.emit(block_id)
+                for bid in frags:
+                    self.started_block.emit(bid)
                 cached = self.cache.get_translation(
-                    self.doc_name, block_id, self.client.model)
+                    self.doc_name, unit["id"], self.client.model)
                 if cached:
-                    self.chunk.emit(block_id, cached)
+                    self.set_pieces.emit(list(zip(frags, split_text(cached, weights))))
                     continue
                 full = ""
-                for delta in self.client.translate_stream(text):
+                first = frags[0]
+                for delta in self.client.translate_stream(unit["text"]):
                     if self._stopped():
                         return
                     full += delta
-                    self.chunk.emit(block_id, delta)
+                    self.chunk.emit(first, delta)  # show progress live
                 if full:
                     self.cache.set_translation(
-                        self.doc_name, block_id, self.client.model, text, full)
+                        self.doc_name, unit["id"], self.client.model,
+                        unit["text"], full)
+                    self.set_pieces.emit(list(zip(frags, split_text(full, weights))))
             except Exception as e:
                 self.failed.emit(str(e))
                 return
@@ -483,6 +531,8 @@ class TranslationView(SelectableView):
         super().__init__()
         self.text_items = {}
         self.covers = {}
+        self.boxes = {}        # block_id -> (w_scene, h_scene)
+        self.base_px = {}      # block_id -> base font pixel size
         self.started = set()
 
     def load(self, doc):
@@ -492,6 +542,8 @@ class TranslationView(SelectableView):
         self.clear_selection()
         self.text_items = {}
         self.covers = {}
+        self.boxes = {}
+        self.base_px = {}
         self.started = set()
         self.scene().setSceneRect(QRectF(0, 0, W, H))
         for p in range(doc.page_count):
@@ -505,10 +557,11 @@ class TranslationView(SelectableView):
             self.scene().addItem(page_item)
             for block in doc.blocks.get(p, []):
                 x0, y0, x1, y1 = block["bbox"]
+                bw, bh = (x1 - x0) * ZOOM, (y1 - y0) * ZOOM
                 pad = 1.0
                 cover = QGraphicsRectItem(
                     x0 * ZOOM - pad, top + y0 * ZOOM - pad,
-                    (x1 - x0) * ZOOM + 2 * pad, (y1 - y0) * ZOOM + 2 * pad)
+                    bw + 2 * pad, bh + 2 * pad)
                 cover.setBrush(QBrush(QColor("white")))
                 cover.setPen(QPen(Qt.PenStyle.NoPen))
                 cover.setZValue(1)
@@ -519,7 +572,7 @@ class TranslationView(SelectableView):
                 px = max(9, int(round(block.get("size", 10.0) * ZOOM * 0.92)))
                 item = QGraphicsTextItem("")
                 item.setPos(x0 * ZOOM, top + y0 * ZOOM)
-                item.setTextWidth(max(40.0, (x1 - x0) * ZOOM))
+                item.setTextWidth(max(40.0, bw))
                 item.document().setDocumentMargin(1)
                 font = QFont()
                 font.setPixelSize(px)
@@ -528,6 +581,35 @@ class TranslationView(SelectableView):
                 item.setZValue(2)
                 self.scene().addItem(item)
                 self.text_items[block["id"]] = item
+                self.boxes[block["id"]] = (bw, bh)
+                self.base_px[block["id"]] = px
+
+    def _fit(self, block_id):
+        """Shrink the font (to a floor) so the text fits its box height — keeps
+        translated paragraphs from overflowing and overlapping neighbours."""
+        item = self.text_items.get(block_id)
+        if not item or block_id not in self.boxes:
+            return
+        bw, bh = self.boxes[block_id]
+        item.setTextWidth(max(40.0, bw))
+        px = self.base_px.get(block_id, 14)
+        font = item.font()
+        allow = bh + bh * 0.18 + 3  # small slack; CJK is usually shorter
+        while px > 8:
+            font.setPixelSize(px)
+            item.setFont(font)
+            if item.boundingRect().height() <= allow:
+                break
+            px -= 1
+
+    def clear_translations(self):
+        """Reset the panel back to the pure original: hide all white covers and
+        empty every translated text item."""
+        for cover in self.covers.values():
+            cover.setVisible(False)
+        for item in self.text_items.values():
+            item.setPlainText("")
+        self.started = set()
 
     def start_block(self, block_id):
         cover = self.covers.get(block_id)
@@ -545,6 +627,21 @@ class TranslationView(SelectableView):
         if item:
             item.setPlainText(item.toPlainText() + delta)
 
+    def set_piece(self, block_id, text):
+        """Set a fragment's final text (after whole-unit translation + split)."""
+        cover = self.covers.get(block_id)
+        if cover:
+            cover.setVisible(True)
+        item = self.text_items.get(block_id)
+        if item:
+            item.setPlainText(text)
+        self.started.add(block_id)
+        self._fit(block_id)   # shrink to fit so it doesn't overlap neighbours
+
+    def set_pieces(self, pieces):
+        for block_id, text in pieces:
+            self.set_piece(block_id, text)
+
 
 # --------------------------------------------------------------------------- #
 # Main window
@@ -552,7 +649,7 @@ class TranslationView(SelectableView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PDF Translate v6 — 论文翻译")
+        self.setWindowTitle("PDF Translate v20 — 论文翻译")
         self.resize(1300, 880)
 
         self.doc = None
@@ -615,6 +712,9 @@ class MainWindow(QMainWindow):
         stop_act = QAction("停止", self)
         stop_act.triggered.connect(self.stop_translation)
         tb.addAction(stop_act)
+        clear_act = QAction("清除译文", self)
+        clear_act.triggered.connect(self.clear_translations)
+        tb.addAction(clear_act)
         tb.addSeparator()
         set_act = QAction("设置", self)
         set_act.triggered.connect(self.open_settings)
@@ -713,27 +813,27 @@ class MainWindow(QMainWindow):
         self._update_page_label()
 
     def _fill_cached(self):
-        for p in range(self.doc.page_count):
-            for block in self.doc.blocks.get(p, []):
-                cached = self.cache.get_translation(
-                    self.doc_name, block["id"], self.client.model)
-                if cached:
-                    self.translation.start_block(block["id"])
-                    self.translation.append_chunk(block["id"], cached)
+        for u in self.doc.units:
+            cached = self.cache.get_translation(
+                self.doc_name, u["id"], self.client.model)
+            if cached:
+                self.translation.set_pieces(
+                    list(zip(u["fragments"], split_text(cached, u["weights"]))))
 
     # ----- translation -----
-    def _start_translation(self, jobs):
-        if not jobs:
+    def _start_translation(self, units):
+        if not units:
             return
         if not self.client:
             QMessageBox.warning(self, "需要 API Key",
                                 "请先在“设置”中填写 API Key 与模型。")
             return
         self.stop_event.clear()  # allow this run
-        worker = TranslateWorker(self.client, self.cache, self.doc_name, jobs,
+        worker = TranslateWorker(self.client, self.cache, self.doc_name, units,
                                  self.stop_event)
         worker.started_block.connect(self.translation.start_block)
         worker.chunk.connect(self.translation.append_chunk)
+        worker.set_pieces.connect(self.translation.set_pieces)
         worker.failed.connect(self._on_worker_failed)
         self.workers.append(worker)
         worker.start()
@@ -741,23 +841,36 @@ class MainWindow(QMainWindow):
     def stop_translation(self):
         self.stop_event.set()
 
+    def clear_translations(self):
+        """Stop any running translation, wipe the right panel back to original,
+        and purge this document's cached translations so they don't auto-fill
+        again on the next open."""
+        if not self.doc:
+            return
+        ans = QMessageBox.question(
+            self, "清除译文",
+            "将清空右侧译文并删除本 PDF 的翻译缓存（重开不会再自动出现）。\n继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self.stop_event.set()
+        self.translation.clear_translations()
+        self.cache.clear_doc(self.doc_name)
+
     def translate_current_page(self):
         if not self.doc:
             return
         p = self.current_page()
-        jobs = [(b["id"], b["text"]) for b in self.doc.blocks.get(p, [])
-                if b.get("translatable", True)]
-        self._start_translation(jobs)
+        ids = set(b["id"] for b in self.doc.blocks.get(p, []))
+        units = [u for u in self.doc.units
+                 if u["translatable"] and any(f in ids for f in u["fragments"])]
+        self._start_translation(units)
 
     def translate_all(self):
         if not self.doc:
             return
-        jobs = []
-        for p in range(self.doc.page_count):
-            for b in self.doc.blocks.get(p, []):
-                if b.get("translatable", True):
-                    jobs.append((b["id"], b["text"]))
-        self._start_translation(jobs)
+        units = [u for u in self.doc.units if u["translatable"]]
+        self._start_translation(units)
 
     def _on_worker_failed(self, msg):
         QMessageBox.critical(self, "翻译失败", msg)
