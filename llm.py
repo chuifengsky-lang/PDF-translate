@@ -60,6 +60,29 @@ class LLMClient:
             if delta:
                 yield delta
 
+    def explain_stream(self, text):
+        """Yield a Chinese explanation of a selected passage: what it means plus
+        relevant concepts/background. This powers the selection popup (it is a
+        look-up / explanation, NOT a translation)."""
+        prompt = (
+            "用简体中文解释下面这段选中的学术内容：\n"
+            "1) 先简要说明它在说什么（含义/要点）；\n"
+            "2) 再补充相关的概念、背景或知识点，帮助理解。\n"
+            "只输出解释，不要逐字翻译原文。\n\n选中内容：\n" + text
+        )
+        stream = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            stream=True,
+        )
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+
     def define_word_stream(self, word, context):
         """Yield a Chinese definition + concept note token-by-token."""
         prompt = (

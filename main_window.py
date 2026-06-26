@@ -187,6 +187,13 @@ def make_translate_producer(client, text):
     return produce
 
 
+def make_explain_producer(client, text):
+    def produce():
+        for d in client.explain_stream(text):
+            yield d
+    return produce
+
+
 # --------------------------------------------------------------------------- #
 # Floating popup (draggable + resizable)
 # --------------------------------------------------------------------------- #
@@ -317,7 +324,7 @@ class ZoomableView(QGraphicsView):
 # --------------------------------------------------------------------------- #
 class SelectableView(ZoomableView):
     wordPicked = pyqtSignal(str, str, QPointF)     # word, context, global_pos
-    translateSelection = pyqtSignal(str, QPointF)  # selected_text, global_pos
+    explainSelection = pyqtSignal(str, QPointF)    # selected_text, global_pos
 
     SEL_Z = 6  # selection highlight z-value (above page/cover/text)
 
@@ -480,7 +487,7 @@ class SelectableView(ZoomableView):
         pos = self._pending_pos
         self._pending_pos = None
         if pos is not None and self.sel_words:
-            self.translateSelection.emit(self._selected_text(), pos)
+            self.explainSelection.emit(self._selected_text(), pos)
 
     def mouseDoubleClickEvent(self, event):
         self._click_timer.stop()
@@ -649,7 +656,7 @@ class TranslationView(SelectableView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PDF Translate v20 — 论文翻译")
+        self.setWindowTitle("PDF Translate v21 — 论文翻译")
         self.resize(1300, 880)
 
         self.doc = None
@@ -673,7 +680,7 @@ class MainWindow(QMainWindow):
 
         for view in (self.original, self.translation):
             view.wordPicked.connect(self.on_word_picked)
-            view.translateSelection.connect(self.on_translate_selection)
+            view.explainSelection.connect(self.on_explain_selection)
             view.zoomRequested.connect(self.do_zoom)
 
         self.original.verticalScrollBar().valueChanged.connect(
@@ -902,15 +909,15 @@ class MainWindow(QMainWindow):
         producer = make_word_producer(self.client, self.cache, word, context)
         self._show_stream(word, producer, global_pos)
 
-    def on_translate_selection(self, text, global_pos):
+    def on_explain_selection(self, text, global_pos):
         if not text.strip():
             return
         if not self.client:
             QMessageBox.warning(self, "需要 API Key",
                                 "请先在“设置”中填写 API Key 与模型。")
             return
-        title = "翻译：" + (text[:18] + "…" if len(text) > 18 else text)
-        producer = make_translate_producer(self.client, text)
+        title = "解释：" + (text[:18] + "…" if len(text) > 18 else text)
+        producer = make_explain_producer(self.client, text)
         self._show_stream(title, producer, global_pos)
 
     # ----- settings -----
