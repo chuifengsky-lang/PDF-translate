@@ -1,0 +1,29 @@
+Traceback (most recent call last):
+  File "D:\PDF translate\PDF translate\main.py", line 50, in <module>
+    main()
+  File "D:\PDF translate\PDF translate\main.py", line 43, in main
+    from main_window import MainWindow  # imported after excepthook is installed
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\PDF translate\PDF translate\main_window.py", line 28, in <module>
+    from pdf_parser import PDFDocument
+ModuleNotFoundError: No module named 'pdf_parser'
+
+------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\PDF translate\PDF translate\main.py", line 50, in <module>
+    main()
+  File "D:\PDF translate\PDF translate\main.py", line 43, in main
+    from main_window import MainWindow  # imported after excepthook is installed
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\PDF translate\PDF translate\main_window.py", line 28, in <module>
+    from pdf_parser import PDFDocument
+ModuleNotFoundError: No module named 'pdf_parser'
+
+------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\PDF translate\main_window.py", line 700, in closeEvent
+    dlg = SettingsDialog(self)
+    
+KeyboardInterrupt
+
+------------------------------------------------------------

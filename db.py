@@ -7,13 +7,18 @@ paying for it again.
 import sqlite3
 import time
 import os
+import threading
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache.db")
 
 
 class Cache:
     def __init__(self, path=DB_PATH):
-        self.conn = sqlite3.connect(path)
+        # check_same_thread=False: the connection is used from background
+        # QThreads (translation / word lookup). All access is serialized by
+        # self._lock so concurrent use is safe.
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self._lock = threading.Lock()
         self._init()
 
     def _init(self):
@@ -42,39 +47,43 @@ class Cache:
 
     # --- translations ---
     def get_translation(self, doc, block_id, model):
-        c = self.conn.cursor()
-        c.execute(
-            "SELECT translation FROM translations WHERE doc=? AND block_id=? AND model=?",
-            (doc, block_id, model),
-        )
-        row = c.fetchone()
-        return row[0] if row else None
+        with self._lock:
+            c = self.conn.cursor()
+            c.execute(
+                "SELECT translation FROM translations WHERE doc=? AND block_id=? AND model=?",
+                (doc, block_id, model),
+            )
+            row = c.fetchone()
+            return row[0] if row else None
 
     def set_translation(self, doc, block_id, model, original, translation):
-        c = self.conn.cursor()
-        c.execute(
-            "INSERT OR REPLACE INTO translations VALUES (?, ?, ?, ?, ?, ?)",
-            (block_id, doc, model, original, translation, int(time.time())),
-        )
-        self.conn.commit()
+        with self._lock:
+            c = self.conn.cursor()
+            c.execute(
+                "INSERT OR REPLACE INTO translations VALUES (?, ?, ?, ?, ?, ?)",
+                (block_id, doc, model, original, translation, int(time.time())),
+            )
+            self.conn.commit()
 
     # --- word definitions ---
     def get_word(self, word, model):
-        c = self.conn.cursor()
-        c.execute(
-            "SELECT definition FROM word_cache WHERE word=? AND model=?",
-            (word.lower(), model),
-        )
-        row = c.fetchone()
-        return row[0] if row else None
+        with self._lock:
+            c = self.conn.cursor()
+            c.execute(
+                "SELECT definition FROM word_cache WHERE word=? AND model=?",
+                (word.lower(), model),
+            )
+            row = c.fetchone()
+            return row[0] if row else None
 
     def set_word(self, word, model, definition):
-        c = self.conn.cursor()
-        c.execute(
-            "INSERT OR REPLACE INTO word_cache VALUES (?, ?, ?, ?)",
-            (word.lower(), model, definition, int(time.time())),
-        )
-        self.conn.commit()
+        with self._lock:
+            c = self.conn.cursor()
+            c.execute(
+                "INSERT OR REPLACE INTO word_cache VALUES (?, ?, ?, ?)",
+                (word.lower(), model, definition, int(time.time())),
+            )
+            self.conn.commit()
 
     def close(self):
         self.conn.close()

@@ -1,7 +1,7 @@
-"""Settings dialog: choose provider, enter API key, set model.
+"""Settings dialog: choose provider + model, enter API key.
 
-API key is stored in the OS credential store via `keyring` (not in plain text).
-Provider/model preferences live in QSettings.
+API key is stored in the OS credential store via `keyring` (with a QSettings
+fallback if keyring is unavailable). Provider/model live in QSettings.
 """
 
 from PyQt6.QtWidgets import (
@@ -15,27 +15,29 @@ try:
 except Exception:
     HAVE_KEYRING = False
 
-from llm import PROVIDERS
+from llm import PROVIDERS, models_for
 
 KEYRING_SERVICE = "pdf-translate"
 ORG = "pdf-translate"
 APP = "pdf-translate"
 
 
+def _get_key(provider):
+    if HAVE_KEYRING:
+        try:
+            return keyring.get_password(KEYRING_SERVICE, provider) or ""
+        except Exception:
+            pass
+    return QSettings(ORG, APP).value("api_key_%s" % provider, "")
+
+
 def load_settings():
     """Return (provider, model, api_key)."""
     s = QSettings(ORG, APP)
     provider = s.value("provider", "deepseek")
-    model = s.value("model", PROVIDERS.get(provider, {}).get("default_model", ""))
-    api_key = ""
-    if HAVE_KEYRING:
-        try:
-            api_key = keyring.get_password(KEYRING_SERVICE, provider) or ""
-        except Exception:
-            api_key = ""
-    if not api_key:
-        api_key = s.value("api_key_%s" % provider, "")  # fallback if no keyring
-    return provider, model, api_key
+    default_model = PROVIDERS.get(provider, {}).get("default_model", "")
+    model = s.value("model", default_model)
+    return provider, model, _get_key(provider)
 
 
 def save_settings(provider, model, api_key):
@@ -50,14 +52,14 @@ def save_settings(provider, model, api_key):
         except Exception:
             saved = False
     if not saved:
-        s.setValue("api_key_%s" % provider, api_key)  # fallback storage
+        s.setValue("api_key_%s" % provider, api_key)
 
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.setMinimumWidth(420)
+        self.setWindowTitle("设置 / Settings")
+        self.setMinimumWidth(440)
 
         provider, model, api_key = load_settings()
 
@@ -65,19 +67,24 @@ class SettingsDialog(QDialog):
         self.provider_box.addItems(list(PROVIDERS.keys()))
         self.provider_box.setCurrentText(provider)
 
-        self.model_edit = QLineEdit(model)
+        self.model_box = QComboBox()
+        self.model_box.setEditable(True)
+        self.model_box.addItems(models_for(provider))
+        self.model_box.setCurrentText(model)
+
         self.key_edit = QLineEdit(api_key)
         self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.key_edit.setPlaceholderText("Paste your API key")
+        self.key_edit.setPlaceholderText("Paste your DeepSeek API key")
 
         self.provider_box.currentTextChanged.connect(self._on_provider_changed)
 
         form = QFormLayout(self)
-        form.addRow(QLabel("LLM provider:"), self.provider_box)
-        form.addRow(QLabel("Model:"), self.model_edit)
-        form.addRow(QLabel("API key:"), self.key_edit)
+        form.addRow(QLabel("LLM 提供商:"), self.provider_box)
+        form.addRow(QLabel("模型:"), self.model_box)
+        form.addRow(QLabel("API Key:"), self.key_edit)
 
-        note = QLabel("Get a DeepSeek key at platform.deepseek.com")
+        note = QLabel("DeepSeek key: platform.deepseek.com · "
+                      "Base URL: https://api.deepseek.com")
         note.setStyleSheet("color: gray; font-size: 11px;")
         form.addRow(note)
 
@@ -89,20 +96,16 @@ class SettingsDialog(QDialog):
         form.addRow(buttons)
 
     def _on_provider_changed(self, provider):
-        # update model + key fields to reflect the newly selected provider
-        self.model_edit.setText(PROVIDERS.get(provider, {}).get("default_model", ""))
-        key = ""
-        if HAVE_KEYRING:
-            try:
-                key = keyring.get_password(KEYRING_SERVICE, provider) or ""
-            except Exception:
-                key = ""
-        self.key_edit.setText(key)
+        self.model_box.clear()
+        self.model_box.addItems(models_for(provider))
+        self.model_box.setCurrentText(
+            PROVIDERS.get(provider, {}).get("default_model", ""))
+        self.key_edit.setText(_get_key(provider))
 
     def values(self):
         return (
             self.provider_box.currentText(),
-            self.model_edit.text().strip(),
+            self.model_box.currentText().strip(),
             self.key_edit.text().strip(),
         )
 
