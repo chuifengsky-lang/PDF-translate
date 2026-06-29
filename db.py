@@ -7,9 +7,19 @@ paying for it again.
 import sqlite3
 import time
 import os
+import sys
 import threading
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache.db")
+
+def _app_dir():
+    """Folder for persistent files (cache.db). When packaged by PyInstaller the
+    script lives in a temp dir that's wiped on exit, so use the exe's folder."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+DB_PATH = os.path.join(_app_dir(), "cache.db")
 
 
 class Cache:

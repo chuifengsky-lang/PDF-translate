@@ -16,7 +16,13 @@ import traceback
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
-LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "error.log")
+def _app_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+LOG_PATH = os.path.join(_app_dir(), "error.log")
 
 
 def _log_and_show(text):

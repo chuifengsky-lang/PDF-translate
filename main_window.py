@@ -36,6 +36,7 @@ from pdf_parser import PDFDocument
 from db import Cache
 from llm import LLMClient
 from settings_dialog import SettingsDialog, load_settings
+from library import LibraryDialog
 
 ZOOM = 2.0
 PAGE_GAP = 14
@@ -656,7 +657,7 @@ class TranslationView(SelectableView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PDF Translate v21 — 论文翻译")
+        self.setWindowTitle("PDF Translate v23 — 论文翻译")
         self.resize(1300, 880)
 
         self.doc = None
@@ -723,6 +724,12 @@ class MainWindow(QMainWindow):
         clear_act.triggered.connect(self.clear_translations)
         tb.addAction(clear_act)
         tb.addSeparator()
+        lib_act = QAction("学习库", self)
+        lib_act.triggered.connect(self.open_library)
+        tb.addAction(lib_act)
+        add_lib_act = QAction("加入学习库", self)
+        add_lib_act.triggered.connect(self.add_current_to_library)
+        tb.addAction(add_lib_act)
         set_act = QAction("设置", self)
         set_act.triggered.connect(self.open_settings)
         tb.addAction(set_act)
@@ -800,6 +807,11 @@ class MainWindow(QMainWindow):
     # ----- file -----
     def open_pdf(self):
         path, _ = QFileDialog.getOpenFileName(self, "打开 PDF", "", "PDF (*.pdf)")
+        if path:
+            self.load_pdf(path)
+
+    def load_pdf(self, path):
+        """Open a PDF into the viewer (used by 打开 PDF and the study library)."""
         if not path:
             return
         if self.doc:
@@ -919,6 +931,21 @@ class MainWindow(QMainWindow):
         title = "解释：" + (text[:18] + "…" if len(text) > 18 else text)
         producer = make_explain_producer(self.client, text)
         self._show_stream(title, producer, global_pos)
+
+    # ----- study library -----
+    def open_library(self):
+        self._library = LibraryDialog(self)
+        self._library.show()
+
+    def add_current_to_library(self):
+        if not self.doc_name:
+            QMessageBox.information(self, "提示", "请先打开一篇 PDF。")
+            return
+        from library import add_paper_to_library
+        name = add_paper_to_library(self, self.doc_name)
+        if name:
+            QMessageBox.information(self, "已加入",
+                                    "已加入学习库文件夹：%s" % name)
 
     # ----- settings -----
     def open_settings(self):
